@@ -7,6 +7,7 @@ import type {
   McpActivityDistributionPayload,
   McpContactRankingsPayload,
   McpContactsPayload,
+  McpExportChatPayload,
   McpGlobalStatisticsPayload,
   McpHealthPayload,
   McpMessagesPayload,
@@ -268,6 +269,10 @@ export class McpReadService {
 
   async resolveSession(rawArgs: Record<string, unknown>): Promise<McpResolveSessionPayload> {
     return this.callProxy<McpResolveSessionPayload>('resolve_session', rawArgs)
+  }
+
+  async exportChat(rawArgs: Record<string, unknown>): Promise<McpExportChatPayload> {
+    return this.callProxy<McpExportChatPayload>('export_chat', rawArgs)
   }
 
   async listSessions(rawArgs: Record<string, unknown>): Promise<McpSessionsPayload> {

@@ -32,6 +32,19 @@ export async function executeMcpTool(
         payload
       }
     }
+    case 'export_chat': {
+      const payload = await readService.exportChat(args as any, reporter)
+      return {
+        summary: payload.success
+          ? `Exported chat for ${payload.resolvedSession?.displayName || payload.resolvedSession?.sessionId || 'target session'}.`
+          : payload.success === false
+            ? `Failed to export chat for ${payload.resolvedSession?.displayName || payload.resolvedSession?.sessionId || 'target session'}.`
+            : payload.canExport
+            ? `Prepared export for ${payload.resolvedSession?.displayName || payload.resolvedSession?.sessionId || 'target session'}.`
+            : 'Export request needs more information.',
+        payload
+      }
+    }
     case 'get_global_statistics': {
       const payload = await readService.getGlobalStatistics(args as any)
       return { summary: 'Loaded global statistics.', payload }

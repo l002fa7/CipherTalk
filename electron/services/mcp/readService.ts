@@ -1,10 +1,11 @@
-import { existsSync, mkdirSync } from 'fs'
+import { accessSync, constants, existsSync, mkdirSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod'
 import { analyticsService } from '../analyticsService'
 import { chatService, type ChatSession, type ContactInfo, type Message } from '../chatService'
 import { ConfigService } from '../config'
+import { exportService, type ExportOptions as ExportServiceOptions } from '../exportService'
 import { imageDecryptService } from '../imageDecryptService'
 import { videoService } from '../videoService'
 import { McpToolError } from './result'
@@ -15,6 +16,11 @@ import {
   type McpContactKind,
   type McpContactsPayload,
   type McpCursor,
+  type McpExportChatPayload,
+  type McpExportDateRange,
+  type McpExportFormat,
+  type McpExportMediaOptions,
+  type McpExportMissingField,
   type McpGlobalStatisticsPayload,
   type McpContactRankingItem,
   type McpContactRankingsPayload,
@@ -55,6 +61,33 @@ const listSessionsArgsSchema = z.object({
 const resolveSessionArgsSchema = z.object({
   query: z.string().trim().min(1),
   limit: z.number().int().positive().optional()
+})
+
+const exportChatArgsSchema = z.object({
+  sessionId: z.string().trim().min(1).optional(),
+  query: z.string().trim().min(1).optional(),
+  format: z.enum(['chatlab', 'chatlab-jsonl', 'json', 'excel', 'html']).optional(),
+  dateRange: z.object({
+    start: z.number().int().positive(),
+    end: z.number().int().positive()
+  }).optional(),
+  mediaOptions: z.object({
+    exportAvatars: z.boolean().optional(),
+    exportImages: z.boolean().optional(),
+    exportVideos: z.boolean().optional(),
+    exportEmojis: z.boolean().optional(),
+    exportVoices: z.boolean().optional()
+  }).optional(),
+  outputDir: z.string().trim().min(1).optional(),
+  validateOnly: z.boolean().optional()
+}).superRefine((value, ctx) => {
+  if (!value.sessionId && !value.query) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['sessionId'],
+      message: 'sessionId or query is required'
+    })
+  }
 })
 
 const getMessagesArgsSchema = z.object({
@@ -126,6 +159,7 @@ const getSessionContextArgsSchema = z.object({
 
 type ListSessionsArgs = z.infer<typeof listSessionsArgsSchema>
 type ResolveSessionArgs = z.infer<typeof resolveSessionArgsSchema>
+type ExportChatArgs = z.infer<typeof exportChatArgsSchema>
 type GetMessagesArgs = z.infer<typeof getMessagesArgsSchema>
 type ListContactsArgs = z.infer<typeof listContactsArgsSchema>
 type SearchMessagesArgs = z.infer<typeof searchMessagesArgsSchema>
@@ -159,6 +193,8 @@ type McpStreamReporter = {
   progress?: (payload: McpStreamProgressPayload) => void | Promise<void>
   partial?: <K extends keyof McpStreamPartialPayloadMap>(toolName: K, payload: McpStreamPartialPayloadMap[K]) => void | Promise<void>
 }
+
+const SUPPORTED_EXPORT_FORMATS: McpExportFormat[] = ['chatlab', 'chatlab-jsonl', 'json', 'excel', 'html']
 
 function toTimestampMs(value?: number | null): number {
   if (!value || !Number.isFinite(value) || value <= 0) return 0
@@ -631,6 +667,134 @@ function buildSearchSessionSummaries(hits: McpSearchHit[]): McpSearchMessagesPay
     .sort((a, b) => b.hitCount - a.hitCount || b.topScore - a.topScore)
 }
 
+function getDefaultExportPath(): string | null {
+  const config = new ConfigService()
+  try {
+    const exportPath = String(config.get('exportPath') || '').trim()
+    return exportPath || null
+  } finally {
+    config.close()
+  }
+}
+
+function isWritableDirectory(dir: string): boolean {
+  try {
+    if (!dir) return false
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true })
+    }
+    accessSync(dir, constants.W_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function isCompleteMediaOptions(
+  mediaOptions?: ExportChatArgs['mediaOptions']
+): mediaOptions is McpExportMediaOptions {
+  return Boolean(
+    mediaOptions
+    && typeof mediaOptions.exportAvatars === 'boolean'
+    && typeof mediaOptions.exportImages === 'boolean'
+    && typeof mediaOptions.exportVideos === 'boolean'
+    && typeof mediaOptions.exportEmojis === 'boolean'
+    && typeof mediaOptions.exportVoices === 'boolean'
+  )
+}
+
+function getNextExportQuestion(missingFields: McpExportMissingField[]): string | undefined {
+  if (missingFields.includes('session')) {
+    return '请先确认要导出哪个会话，可以提供 sessionId 或更具体的联系人线索。'
+  }
+  if (missingFields.includes('dateRange')) {
+    return '请补充导出的时间范围，至少需要开始时间和结束时间。'
+  }
+  if (missingFields.includes('format')) {
+    return '请确认导出格式，仅支持 chatlab、chatlab-jsonl、json、excel、html。'
+  }
+  if (missingFields.includes('mediaOptions')) {
+    return '请明确是否导出头像、图片、视频、表情、语音。'
+  }
+  if (missingFields.includes('outputDir')) {
+    return '默认导出目录不可用，请提供一个可写入的导出目录。'
+  }
+  return undefined
+}
+
+function buildExportFollowUpQuestions(missingFields: McpExportMissingField[]): Array<{
+  field: McpExportMissingField
+  question: string
+}> {
+  const questions: Array<{ field: McpExportMissingField; question: string }> = []
+
+  for (const field of missingFields) {
+    if (field === 'session') {
+      questions.push({
+        field,
+        question: '你要导出哪个会话？可以给我更具体的联系人、备注名或 sessionId。'
+      })
+    } else if (field === 'dateRange') {
+      questions.push({
+        field,
+        question: '这次导出的时间范围是什么？请给我开始时间和结束时间。'
+      })
+    } else if (field === 'format') {
+      questions.push({
+        field,
+        question: '你要导出成哪种格式？目前支持 chatlab、chatlab-jsonl、json、excel、html。'
+      })
+    } else if (field === 'mediaOptions') {
+      questions.push({
+        field,
+        question: '媒体要怎么导？请分别确认是否包含头像、图片、视频、表情、语音。'
+      })
+    } else if (field === 'outputDir') {
+      questions.push({
+        field,
+        question: '默认导出目录不可用，请给我一个可写入的导出目录。'
+      })
+    }
+  }
+
+  return questions
+}
+
+function buildPredictedExportPath(
+  outputDir: string,
+  resolvedSession: Pick<McpResolvedSessionCandidate, 'displayName'>,
+  format: McpExportFormat,
+  mediaOptions: McpExportMediaOptions
+): string {
+  const safeName = resolvedSession.displayName.replace(/[<>:"/\\|?*]/g, '_').replace(/\.+$/, '').trim() || 'export'
+  const ext = format === 'chatlab-jsonl'
+    ? '.jsonl'
+    : format === 'excel'
+      ? '.xlsx'
+      : format === 'html'
+        ? '.html'
+        : '.json'
+  const hasMedia = mediaOptions.exportImages || mediaOptions.exportVideos || mediaOptions.exportEmojis || mediaOptions.exportVoices
+  const sessionOutputDir = hasMedia ? join(outputDir, safeName) : outputDir
+  return join(sessionOutputDir, `${safeName}${ext}`)
+}
+
+function toExportServiceOptions(
+  format: McpExportFormat,
+  dateRange: McpExportDateRange,
+  mediaOptions: McpExportMediaOptions
+): ExportServiceOptions {
+  return {
+    format,
+    dateRange,
+    exportAvatars: mediaOptions.exportAvatars,
+    exportImages: mediaOptions.exportImages,
+    exportVideos: mediaOptions.exportVideos,
+    exportEmojis: mediaOptions.exportEmojis,
+    exportVoices: mediaOptions.exportVoices
+  }
+}
+
 function resolveSessionRefStrict(
   rawInput: string,
   sessions: McpSessionItem[],
@@ -1058,6 +1222,160 @@ export class McpReadService {
 
     await reportPartial(reporter, 'resolve_session', payload)
     return payload
+  }
+
+  async exportChat(rawArgs: ExportChatArgs, reporter?: McpStreamReporter): Promise<McpExportChatPayload> {
+    const args = exportChatArgsSchema.safeParse(rawArgs)
+    if (!args.success) {
+      throw new McpToolError('BAD_REQUEST', 'Invalid export_chat arguments.', args.error.message)
+    }
+
+    const data = args.data
+    const validateOnly = Boolean(data.validateOnly)
+    await reportProgress(reporter, {
+      stage: 'validating_export_request',
+      message: 'Validating export request.'
+    })
+
+    const [{ items: sessions, map: sessionMap }, { items: contacts, map: contactMap }] = await Promise.all([
+      getSessionCatalog(),
+      getContactCatalog()
+    ])
+
+    let resolvedSession: McpResolvedSessionCandidate | undefined
+    let candidates: McpResolvedSessionCandidate[] = []
+
+    if (data.sessionId || data.query) {
+      const query = data.sessionId || data.query || ''
+      const matchedCandidates = findSessionCandidates(query, sessions, contacts).slice(0, 5)
+      candidates = matchedCandidates.map((candidate) => toResolvedCandidate(candidate, query))
+
+      try {
+        const resolved = await resolveSessionRefStrictWithProgress(query, sessions, sessionMap, contacts, contactMap, reporter)
+        const matched = matchedCandidates.find((candidate) => candidate.entry.session.sessionId === resolved.sessionId)
+        resolvedSession = matched ? toResolvedCandidate(matched, query) : {
+          ...resolved,
+          score: 1000,
+          confidence: 'high',
+          aliases: [resolved.displayName, resolved.sessionId],
+          evidence: ['Resolved directly from the provided session clue.']
+        }
+      } catch (error) {
+        if (!(error instanceof McpToolError) || (error.code !== 'BAD_REQUEST' && error.code !== 'SESSION_NOT_FOUND')) {
+          throw error
+        }
+      }
+    }
+
+    const missingFields: McpExportMissingField[] = []
+    if (!resolvedSession) {
+      missingFields.push('session')
+    }
+    if (!data.dateRange || !data.dateRange.start || !data.dateRange.end) {
+      missingFields.push('dateRange')
+    } else if (data.dateRange.start > data.dateRange.end) {
+      throw new McpToolError('BAD_REQUEST', 'Invalid export date range.', 'dateRange.start must be earlier than or equal to dateRange.end.')
+    }
+    if (!data.format) {
+      missingFields.push('format')
+    } else if (!SUPPORTED_EXPORT_FORMATS.includes(data.format)) {
+      throw new McpToolError('BAD_REQUEST', 'Unsupported export format.', `Only ${SUPPORTED_EXPORT_FORMATS.join(', ')} are supported.`)
+    }
+    if (!isCompleteMediaOptions(data.mediaOptions)) {
+      missingFields.push('mediaOptions')
+    }
+
+    const requestedOutputDir = String(data.outputDir || '').trim()
+    const outputDir = requestedOutputDir || getDefaultExportPath() || ''
+    if (!outputDir || !isWritableDirectory(outputDir)) {
+      missingFields.push('outputDir')
+    }
+
+    const nextQuestion = getNextExportQuestion(missingFields)
+    const followUpQuestions = buildExportFollowUpQuestions(missingFields)
+    const payload: McpExportChatPayload = {
+      canExport: missingFields.length === 0,
+      validateOnly,
+      missingFields,
+      nextQuestion,
+      followUpQuestions,
+      resolvedSession,
+      candidates,
+      outputDir: outputDir || undefined,
+      format: data.format,
+      dateRange: data.dateRange,
+      mediaOptions: isCompleteMediaOptions(data.mediaOptions) ? data.mediaOptions : undefined,
+      message: missingFields.length === 0
+        ? validateOnly
+          ? 'Export request is complete and ready to run.'
+          : 'Export request validated and ready to execute.'
+        : 'Export request is incomplete and needs more information.'
+    }
+
+    await reportPartial(reporter, 'export_chat', payload)
+
+    if (missingFields.length > 0 || validateOnly) {
+      return payload
+    }
+
+    await reportProgress(reporter, {
+      stage: 'preparing_export',
+      message: `Preparing export for ${resolvedSession!.displayName}.`,
+      candidates: [{ sessionId: resolvedSession!.sessionId, displayName: resolvedSession!.displayName, kind: resolvedSession!.kind }],
+      candidateCount: 1
+    })
+
+    const exportOptions = toExportServiceOptions(
+      data.format!,
+      data.dateRange!,
+      data.mediaOptions as McpExportMediaOptions
+    )
+
+    const predictedOutputPath = buildPredictedExportPath(
+      outputDir,
+      resolvedSession!,
+      data.format!,
+      data.mediaOptions as McpExportMediaOptions
+    )
+
+    const result = await exportService.exportSessions(
+      [resolvedSession!.sessionId],
+      outputDir,
+      exportOptions,
+      (progress) => {
+        const stage = progress.phase === 'writing'
+          ? 'writing'
+          : progress.phase === 'exporting'
+            ? 'exporting'
+            : progress.phase === 'complete'
+              ? 'completed'
+              : 'preparing_export'
+
+        void reportProgress(reporter, {
+          stage,
+          message: progress.detail || progress.phase,
+          sessionsScanned: progress.current,
+          candidates: [{ sessionId: resolvedSession!.sessionId, displayName: resolvedSession!.displayName, kind: resolvedSession!.kind }],
+          candidateCount: 1
+        })
+      }
+    )
+
+    const completedPayload: McpExportChatPayload = {
+      ...payload,
+      canExport: true,
+      success: result.success,
+      successCount: result.successCount,
+      failCount: result.failCount,
+      error: result.error,
+      outputPath: predictedOutputPath,
+      message: result.success
+        ? `Exported chat for ${resolvedSession!.displayName}.`
+        : `Failed to export chat for ${resolvedSession!.displayName}.`
+    }
+
+    await reportPartial(reporter, 'export_chat', completedPayload)
+    return completedPayload
   }
 
   async listSessions(rawArgs: ListSessionsArgs, reporter?: McpStreamReporter): Promise<McpSessionsPayload> {

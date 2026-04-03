@@ -2,6 +2,7 @@ export const MCP_TOOL_NAMES = [
   'health_check',
   'get_status',
   'resolve_session',
+  'export_chat',
   'list_sessions',
   'get_messages',
   'list_contacts',
@@ -56,7 +57,11 @@ export type McpStreamProgressStage =
   | 'searching_contacts'
   | 'searching_sessions'
   | 'resolving_candidates'
+  | 'validating_export_request'
+  | 'preparing_export'
   | 'scanning_messages'
+  | 'exporting'
+  | 'writing'
   | 'streaming_hits'
   | 'completed'
   | 'failed'
@@ -147,6 +152,51 @@ export interface McpResolveSessionPayload {
   recommended?: McpResolvedSessionCandidate
   candidates: McpResolvedSessionCandidate[]
   suggestedNextAction: 'get_messages' | 'get_session_context' | 'search_messages' | 'list_contacts' | 'list_sessions'
+  message: string
+}
+
+export type McpExportFormat = 'chatlab' | 'chatlab-jsonl' | 'json' | 'excel' | 'html'
+
+export interface McpExportMediaOptions {
+  exportAvatars: boolean
+  exportImages: boolean
+  exportVideos: boolean
+  exportEmojis: boolean
+  exportVoices: boolean
+}
+
+export type McpExportMissingField =
+  | 'session'
+  | 'dateRange'
+  | 'format'
+  | 'mediaOptions'
+  | 'outputDir'
+
+export interface McpExportDateRange {
+  start: number
+  end: number
+}
+
+export interface McpExportChatPayload {
+  canExport: boolean
+  validateOnly: boolean
+  missingFields: McpExportMissingField[]
+  nextQuestion?: string
+  followUpQuestions?: Array<{
+    field: McpExportMissingField
+    question: string
+  }>
+  resolvedSession?: McpResolvedSessionCandidate
+  candidates?: McpResolvedSessionCandidate[]
+  outputDir?: string
+  outputPath?: string
+  format?: McpExportFormat
+  dateRange?: McpExportDateRange
+  mediaOptions?: McpExportMediaOptions
+  success?: boolean
+  successCount?: number
+  failCount?: number
+  error?: string
   message: string
 }
 
@@ -309,6 +359,7 @@ export interface McpStreamProgressPayload {
 
 export interface McpStreamPartialPayloadMap {
   resolve_session: Partial<McpResolveSessionPayload>
+  export_chat: Partial<McpExportChatPayload>
   list_sessions: Partial<McpSessionsPayload>
   list_contacts: Partial<McpContactsPayload>
   get_messages: Partial<McpMessagesPayload>
@@ -317,6 +368,7 @@ export interface McpStreamPartialPayloadMap {
 }
 
 export type McpStreamPartialPayload =
+  | McpStreamPartialPayloadMap['export_chat']
   | McpStreamPartialPayloadMap['list_sessions']
   | McpStreamPartialPayloadMap['list_contacts']
   | McpStreamPartialPayloadMap['get_messages']

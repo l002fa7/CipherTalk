@@ -47,6 +47,36 @@ export function registerCipherTalkMcpTools(server: any) {
     }
   })
 
+  server.registerTool('export_chat', {
+    title: 'Export Chat',
+    description: 'Validate and export chat history for one resolved session. This tool strictly checks target session, date range, export format, media selections, and output directory before exporting.',
+    inputSchema: {
+      sessionId: z.string().trim().min(1).optional().describe('Resolved sessionId when already known.'),
+      query: z.string().trim().min(1).optional().describe('Fuzzy session clue when sessionId is not yet known.'),
+      format: z.enum(['chatlab', 'chatlab-jsonl', 'json', 'excel', 'html']).optional().describe('Export format.'),
+      dateRange: z.object({
+        start: z.number().int().positive(),
+        end: z.number().int().positive()
+      }).optional().describe('Required export time range in seconds or milliseconds.'),
+      mediaOptions: z.object({
+        exportAvatars: z.boolean().optional(),
+        exportImages: z.boolean().optional(),
+        exportVideos: z.boolean().optional(),
+        exportEmojis: z.boolean().optional(),
+        exportVoices: z.boolean().optional()
+      }).optional().describe('Required explicit media export selections.'),
+      outputDir: z.string().trim().min(1).optional().describe('Optional output directory. If omitted, the configured default export path will be used when available.'),
+      validateOnly: z.boolean().optional().describe('When true, only validate completeness and return missing fields without exporting.')
+    }
+  }, async (args: unknown) => {
+    try {
+      const payload = await readService.exportChat((args || {}) as any)
+      return createToolSuccess(payload.message, payload)
+    } catch (error) {
+      return createToolError(error)
+    }
+  })
+
   server.registerTool('get_global_statistics', {
     title: 'Get Global Statistics',
     description: 'Return global private-chat statistics for agent-side analysis.',

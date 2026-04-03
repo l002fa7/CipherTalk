@@ -66,6 +66,39 @@ After each meaningful exploration round, produce a very short battle report for 
 
 Keep it short. It should help trace the reasoning, not overshadow the answer.
 
+## Export workflow
+
+When the user asks to export chat history:
+
+1. Check whether the request already includes:
+   - target session
+   - time range
+   - export format
+   - media selections
+2. If the target is fuzzy, resolve it first with `resolve_session`.
+3. If the target is still ambiguous, keep narrowing and do not export yet.
+4. Use `export_chat(validateOnly=true)` to audit whether the request is complete.
+5. If `missingFields` is non-empty, prefer `followUpQuestions`; otherwise fall back to `nextQuestion`.
+6. Ask follow-up questions until the missing fields are all resolved.
+7. Prefer the configured default export directory when it exists and is writable.
+8. If the default export directory is unavailable, ask the user for an output directory.
+9. Only call `export_chat` without `validateOnly` after the request is complete.
+
+When asking follow-up questions for export:
+
+- ask only for missing fields
+- do not ask again for fields the user already confirmed
+- treat media selections as required and explicit
+- do not silently assume a time range
+
+After export finishes, summarize:
+
+- which session was exported
+- the time range
+- the format
+- which media were included
+- where the files were written
+
 ## Never do this
 
 - Do not conclude “没有数据” after a single failed query.
@@ -73,7 +106,10 @@ Keep it short. It should help trace the reasoning, not overshadow the answer.
 - Do not ignore `hint` or candidate summaries returned by MCP.
 - Do not ignore `evidence` on resolved candidates or `sessionSummaries` on search results.
 - Do not lock onto a candidate while ambiguity is still obvious.
+- Do not start exporting before target session, time range, format, and media selections are all confirmed.
+- Do not quietly choose a time range or media mix on the user’s behalf.
 
 ## References
 
 - Read [references/queries.md](references/queries.md) when you need concrete fuzzy-query playbooks, fallback chains, or battle-report examples.
+- Read [references/export.md](references/export.md) when the user asks to export chat history.
